@@ -121,11 +121,11 @@ class TestBuildCsvRows:
         )
         assert rows[0]["Narration"] == "2025-01 Load Net Activity"
         assert rows[0]["Date"] == "1 Jul 2025"
-        assert rows[0]["AccountCode"] == "300 - Accountancy Fees"
+        assert rows[0]["Account"] == "300 - Accountancy Fees"
 
     def test_unmatched_row_gets_blank_account_code(self):
         rows = build_csv_rows([{"description": "999 - New Account", "amount": "500.00"}], year=2025)
-        assert rows[0]["AccountCode"] == ""
+        assert rows[0]["Account"] == ""
 
 
 class TestParsePriorJournal:
@@ -207,8 +207,8 @@ class TestMatchEndpoint:
         assert body["ledger_format"] == "xero"
         assert len(body["matched_csv_rows"]) == 1
         assert len(body["unmatched_csv_rows"]) == 1
-        assert body["matched_csv_rows"][0]["AccountCode"] == "300 - Accountancy Fees"
-        assert body["unmatched_csv_rows"][0]["AccountCode"] == ""
+        assert body["matched_csv_rows"][0]["Account"] == "300 - Accountancy Fees"
+        assert body["unmatched_csv_rows"][0]["Account"] == ""
 
     def test_match_myob_happy_path(self):
         prior_journal = (

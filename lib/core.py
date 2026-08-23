@@ -5,7 +5,7 @@ All functions here are deterministic and side-effect-free with respect to
 the filesystem — they operate on bytes/strings in, structured data or
 strings out. This is intentional: Vercel Functions are stateless and have
 no persistent disk, so nothing here reads or writes a file path. The one
-LLM-driven judgment step (proposing AccountCode for unmatched rows) lives
+LLM-driven judgment step (proposing Account for unmatched rows) lives
 entirely outside this module, in whatever agent/service calls it.
 """
 
@@ -24,7 +24,7 @@ import openpyxl
 # --------------------------------------------------------------------------
 
 CSV_COLUMNS = [
-    "Narration", "Date", "Description", "AccountCode", "TaxRate", "Amount",
+    "Narration", "Date", "Description", "Account", "TaxRate", "Amount",
     "TrackingName1", "TrackingOption1", "TrackingName2", "TrackingOption2",
 ]
 
@@ -99,17 +99,17 @@ def build_csv_rows(rows: list[GLRow] | list[MatchedRow], year: int) -> list[dict
     fixed/derived fields (Narration, Date, TaxRate, blank tracking fields).
 
     Works for both matched rows (which already have an `account_code`) and
-    unmatched rows (which don't yet) — AccountCode is left blank ("") for
+    unmatched rows (which don't yet) — Account is left blank ("") for
     any row missing that key, ready for a downstream step to fill in.
     """
     narration = f"{year}-01 Load Net Activity"
-    date = f"1 Jul {year}"
+    date = f"30 Jun {year}"
     return [
         {
             "Narration": narration,
             "Date": date,
             "Description": row["description"],
-            "AccountCode": row.get("account_code", ""),
+            "Account": row.get("account_code", ""),
             "TaxRate": TAX_RATE,
             "Amount": row["amount"],
             "TrackingName1": "",
@@ -296,7 +296,7 @@ def _extract_year(sheet) -> int | None:
 
 def parse_prior_journal(raw_text: str) -> tuple[dict[str, str], int]:
     """Parse pasted, tab-delimited prior-year journal text into a
-    Description -> AccountCode lookup.
+    Description -> Account lookup.
 
     Tolerant of blank lines and rows missing a value (skipped, counted).
     Raises ProcessingError if the required columns aren't present at all —
