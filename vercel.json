@@ -1,8 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "gl-journal-api/app.py": {
-      "excludeFiles": "{tests/**,__tests__/**,**/*.test.py,**/test_*.py,.pytest_cache/**}"
+    "app.py": {
+      "excludeFiles": "{tests/**,__tests__/**,**/*.test.py,**/test_*.py,.pytest_cache/**,.venv/**,**/.venv/**}"
     }
   }
 }
