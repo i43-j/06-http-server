@@ -1,2 +1,0 @@
-[tool.vercel]
-entrypoint = "gl-journal-api.app:app"
