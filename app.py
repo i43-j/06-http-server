@@ -335,6 +335,60 @@ SWAGGER2_SPEC = json.loads(SWAGGER2_SPEC_JSON)
 
 
 # --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+_ZIP_MAGIC = b"PK\x03\x04"
+
+
+def _decode_gl_summary(value: str) -> bytes:
+    """Decode the incoming gl_summary_base64 field into raw .xlsx bytes.
+
+    Tolerant of both plain single-encoded base64 AND accidentally
+    double-encoded base64 (some upstream clients, e.g. Power Automate/
+    Copilot Studio flows, implicitly base64-encode binary trigger content
+    before a user-authored base64() expression runs, silently producing
+    a double-encoded value). Also tolerant of the field arriving as raw,
+    un-encoded bytes (rare, but seen from some flow configurations),
+    since in that case the "not valid base64" decode attempt is skipped
+    and the raw bytes are used directly if they already look like a zip.
+    """
+    text = value.strip()
+
+    # Case 1: already raw bytes (starts with the zip magic number as text).
+    if text.encode("latin-1", errors="ignore").startswith(_ZIP_MAGIC):
+        try:
+            return text.encode("latin-1")
+        except UnicodeEncodeError:
+            pass  # fall through to base64 attempts
+
+    # Case 2: single or double base64-encoded.
+    candidate = text
+    for _ in range(2):
+        try:
+            decoded = base64.b64decode(candidate, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ProcessingError(f"gl_summary_base64 is not valid base64: {exc}") from exc
+        if decoded.startswith(_ZIP_MAGIC):
+            return decoded
+        # Not a zip yet — maybe it decoded down to another layer of
+        # base64 text. Try decoding again before giving up.
+        try:
+            candidate = decoded.decode("ascii")
+        except UnicodeDecodeError:
+            raise ProcessingError(
+                "gl_summary_base64 did not decode to a valid .xlsx (zip) file, "
+                "even after unwrapping one layer of base64."
+            )
+
+    raise ProcessingError(
+        "gl_summary_base64 did not decode to a valid .xlsx (zip) file after "
+        "up to two rounds of base64 decoding. Confirm the field contains the "
+        "file's base64 content and hasn't been triple-encoded or corrupted."
+    )
+
+
+# --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
 
@@ -344,10 +398,7 @@ async def match(request: MatchRequest) -> MatchResponse:
         if request.ledger_format is not None and request.ledger_format not in ("xero", "myob"):
             raise ProcessingError("ledger_format must be 'xero' or 'myob' if provided.")
 
-        try:
-            gl_bytes = base64.b64decode(request.gl_summary_base64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise ProcessingError(f"gl_summary_base64 is not valid base64: {exc}") from exc
+        gl_bytes = _decode_gl_summary(request.gl_summary_base64)
 
         gl_rows, year, detected_format = parse_ledger(
             gl_bytes, filename=request.gl_summary_filename, ledger_format=request.ledger_format
