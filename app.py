@@ -2,11 +2,10 @@
 GL Journal Processor — API entrypoint for Vercel Functions.
 
 Two endpoints:
-    POST /match  — send a GL summary (.xlsx, base64-encoded) + the prior
-                   year's journal (pasted text) as JSON. Returns
-                   matched_csv_rows (final, done) and unmatched_csv_rows
-                   (AccountCode blank, needs the caller's LLM step + user
-                   review before writing).
+    POST /match  — upload a GL summary (.xlsx) + paste the prior year's
+                   journal (text). Returns matched_csv_rows (final, done)
+                   and unmatched_csv_rows (AccountCode blank, needs the
+                   caller's LLM step + user review before writing).
     POST /write  — given the final combined list of shaped rows (matched
                    + AccountCode-filled unmatched), returns the CSV file
                    content directly in the response body.
@@ -17,21 +16,16 @@ Two endpoints:
                    Vercel's Python bundler doesn't reliably ship loose
                    non-.py files alongside the function.
 
-Nothing here touches the filesystem. Vercel Functions are stateless: the
-uploaded file arrives as a base64 string inside the JSON body (rather
-than multipart/form-data — Power Automate/Copilot Studio's "HTTP with
-Swagger" action handles JSON far more reliably than multipart), and the
-output CSV is streamed back in the HTTP response rather than written to
-disk anywhere.
+Nothing here touches the filesystem. Vercel Functions are stateless: file
+uploads are read into memory, and the output CSV is streamed back in the
+HTTP response rather than written to disk anywhere.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -50,19 +44,6 @@ app = FastAPI(title="GL Journal Processor")
 # --------------------------------------------------------------------------
 # Response / request models
 # --------------------------------------------------------------------------
-
-class MatchRequest(BaseModel):
-    gl_summary_base64: str = Field(
-        ..., description="GL summary .xlsx file content, base64-encoded (no data URI prefix — raw base64 only)."
-    )
-    gl_summary_filename: str | None = Field(
-        None, description="Optional original filename, used as a fallback signal for detecting Xero vs MYOB."
-    )
-    prior_journal_text: str = Field(..., description="Pasted prior year journal, tab-separated")
-    ledger_format: str | None = Field(
-        None, description="Optional override: 'xero' or 'myob'. Auto-detected from the file if omitted."
-    )
-
 
 class MatchResponse(BaseModel):
     year: int
@@ -88,7 +69,7 @@ SWAGGER2_SPEC_JSON = r'''
   "info": {
     "title": "GL Journal Processor",
     "description": "Matches a GL summary export (Xero or MYOB) against a pasted prior-year journal, and writes the final combined rows out as a downloadable CSV import file.",
-    "version": "1.1.0"
+    "version": "1.0.0"
   },
   "host": "06-http-server-delta.vercel.app",
   "basePath": "/",
@@ -96,6 +77,7 @@ SWAGGER2_SPEC_JSON = r'''
     "https"
   ],
   "consumes": [
+    "multipart/form-data",
     "application/json"
   ],
   "produces": [
@@ -107,18 +89,35 @@ SWAGGER2_SPEC_JSON = r'''
       "post": {
         "operationId": "matchGlJournal",
         "summary": "Match a GL summary against the prior year's journal",
-        "description": "Send a GL summary .xlsx file (Xero 'General Ledger Summary' or MYOB 'General Ledger Report'), base64-encoded, plus a pasted tab-separated prior-year journal. Returns rows that matched by Description (Account filled in) and rows that did not (Account blank, needs review before /write).",
+        "description": "Uploads a GL summary .xlsx file (Xero 'General Ledger Summary' or MYOB 'General Ledger Report') and a pasted, tab-separated prior-year journal. Returns rows that matched by Description (Account filled in) and rows that did not (Account blank, needs review before /write).",
         "consumes": [
-          "application/json"
+          "multipart/form-data"
         ],
         "parameters": [
           {
-            "name": "body",
-            "in": "body",
+            "name": "gl_summary",
+            "in": "formData",
             "required": true,
-            "schema": {
-              "$ref": "#/definitions/MatchRequest"
-            }
+            "type": "file",
+            "description": "GL summary .xlsx file \u2014 Xero 'General Ledger Summary' export or MYOB 'General Ledger Report' export."
+          },
+          {
+            "name": "prior_journal_text",
+            "in": "formData",
+            "required": true,
+            "type": "string",
+            "description": "Pasted prior year journal, tab-separated, with at least 'Description' and 'Account' columns in the header row."
+          },
+          {
+            "name": "ledger_format",
+            "in": "formData",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "xero",
+              "myob"
+            ],
+            "description": "Optional override for which ledger format to parse the file as. If omitted, auto-detected."
           }
         ],
         "responses": {
@@ -194,35 +193,6 @@ SWAGGER2_SPEC_JSON = r'''
     }
   },
   "definitions": {
-    "MatchRequest": {
-      "type": "object",
-      "required": [
-        "gl_summary_base64",
-        "prior_journal_text"
-      ],
-      "properties": {
-        "gl_summary_base64": {
-          "type": "string",
-          "description": "GL summary .xlsx file content, base64-encoded (no data URI prefix \u2014 raw base64 only)."
-        },
-        "gl_summary_filename": {
-          "type": "string",
-          "description": "Optional original filename, e.g. 'General Ledger Summary.xlsx'. Used as a fallback signal for detecting Xero vs MYOB if the header row is ambiguous."
-        },
-        "prior_journal_text": {
-          "type": "string",
-          "description": "Pasted prior year journal, tab-separated, with at least 'Description' and 'Account' columns in the header row."
-        },
-        "ledger_format": {
-          "type": "string",
-          "enum": [
-            "xero",
-            "myob"
-          ],
-          "description": "Optional override for which ledger format to parse the file as. If omitted, auto-detected."
-        }
-      }
-    },
     "CsvRow": {
       "type": "object",
       "description": "A single shaped row matching the CSV import template's columns.",
@@ -335,73 +305,24 @@ SWAGGER2_SPEC = json.loads(SWAGGER2_SPEC_JSON)
 
 
 # --------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------
-
-_ZIP_MAGIC = b"PK\x03\x04"
-
-
-def _decode_gl_summary(value: str) -> bytes:
-    """Decode the incoming gl_summary_base64 field into raw .xlsx bytes.
-
-    Tolerant of both plain single-encoded base64 AND accidentally
-    double-encoded base64 (some upstream clients, e.g. Power Automate/
-    Copilot Studio flows, implicitly base64-encode binary trigger content
-    before a user-authored base64() expression runs, silently producing
-    a double-encoded value). Also tolerant of the field arriving as raw,
-    un-encoded bytes (rare, but seen from some flow configurations),
-    since in that case the "not valid base64" decode attempt is skipped
-    and the raw bytes are used directly if they already look like a zip.
-    """
-    text = value.strip()
-
-    # Case 1: already raw bytes (starts with the zip magic number as text).
-    if text.encode("latin-1", errors="ignore").startswith(_ZIP_MAGIC):
-        try:
-            return text.encode("latin-1")
-        except UnicodeEncodeError:
-            pass  # fall through to base64 attempts
-
-    # Case 2: single or double base64-encoded.
-    candidate = text
-    for _ in range(2):
-        try:
-            decoded = base64.b64decode(candidate, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise ProcessingError(f"gl_summary_base64 is not valid base64: {exc}") from exc
-        if decoded.startswith(_ZIP_MAGIC):
-            return decoded
-        # Not a zip yet — maybe it decoded down to another layer of
-        # base64 text. Try decoding again before giving up.
-        try:
-            candidate = decoded.decode("ascii")
-        except UnicodeDecodeError:
-            raise ProcessingError(
-                "gl_summary_base64 did not decode to a valid .xlsx (zip) file, "
-                "even after unwrapping one layer of base64."
-            )
-
-    raise ProcessingError(
-        "gl_summary_base64 did not decode to a valid .xlsx (zip) file after "
-        "up to two rounds of base64 decoding. Confirm the field contains the "
-        "file's base64 content and hasn't been triple-encoded or corrupted."
-    )
-
-
-# --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
 
 @app.post("/match", response_model=MatchResponse)
-async def match(request: MatchRequest) -> MatchResponse:
+async def match(
+    gl_summary: UploadFile = File(..., description="GL summary .xlsx file (Xero) or GL report .xlsx file (MYOB)"),
+    prior_journal_text: str = Form(..., description="Pasted prior year journal, tab-separated"),
+    ledger_format: str | None = Form(
+        None, description="Optional override: 'xero' or 'myob'. Auto-detected from the file if omitted."
+    ),
+) -> MatchResponse:
     try:
-        if request.ledger_format is not None and request.ledger_format not in ("xero", "myob"):
+        if ledger_format is not None and ledger_format not in ("xero", "myob"):
             raise ProcessingError("ledger_format must be 'xero' or 'myob' if provided.")
 
-        gl_bytes = _decode_gl_summary(request.gl_summary_base64)
-
+        gl_bytes = await gl_summary.read()
         gl_rows, year, detected_format = parse_ledger(
-            gl_bytes, filename=request.gl_summary_filename, ledger_format=request.ledger_format
+            gl_bytes, filename=gl_summary.filename, ledger_format=ledger_format
         )
 
         if year is None:
@@ -411,7 +332,7 @@ async def match(request: MatchRequest) -> MatchResponse:
                 "'For the period ...' line."
             )
 
-        prior_lookup, skipped = parse_prior_journal(request.prior_journal_text)
+        prior_lookup, skipped = parse_prior_journal(prior_journal_text)
         matched, unmatched = match_rows(gl_rows, prior_lookup)
 
         matched_csv_rows = build_csv_rows(matched, year)
